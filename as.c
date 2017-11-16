@@ -3,10 +3,11 @@
 #include <string.h>
 
 #include "elf.h"
-#include "vm.h"
-#include "vm_codegen.h"
+#include "hash_table.h"
 #include "opcode.h"
 #include "private.h"
+#include "vm.h"
+#include "vm_codegen.h"
 
 #define NOT_IN_QUOTE '\0'
 #define IS_QUOTE(qs, c) \
@@ -16,6 +17,8 @@
         qs = c;          \
     } while (0)
 #define IS_ESC(c) (c == '\\')
+
+entry **table;
 
 /*
  * A customized version of strsep. It is different in that:
@@ -163,15 +166,24 @@ static const struct instruction *find_inst(const char *name)
     return NULL;
 }
 
-static inline vm_operand make_operand(vm_env *env, char *line, const char *data)
+static inline vm_operand make_operand(vm_env *env, char *line, char *data)
 {
     vm_operand op;
 
     if (data == NULL || data[0] == ';') {
         printf("Error: missing operand in the following line\n");
         printf("       %s\n", line);
-        free(line);
         exit(-1);
+    }
+
+    if (data[0] == '@') {
+        int line_cnt = find_from_ht((const char *) (data + 1), table);
+        if (line_cnt == -1) {
+            printf("Error: missing label in the following line\n");
+            printf("       %s\n", data);
+            exit(-1);
+        }
+        sprintf(data, "#%d", line_cnt);
     }
 
     switch (data[0]) {
@@ -199,7 +211,6 @@ static inline vm_operand make_operand(vm_env *env, char *line, const char *data)
             "       # (temp integer)\n"
             "       \" (string literal)\n",
             data, line);
-        free(line);
         exit(-1);
         break;
     }
@@ -213,7 +224,6 @@ static inline int make_result(vm_env *env, char *line, const char *data)
             "Error: missing result in the following line\n"
             "       %s\n",
             line);
-        free(line);
         exit(-1);
     }
 
@@ -224,7 +234,6 @@ static inline int make_result(vm_env *env, char *line, const char *data)
             "Supported types:\n"
             "       # (temp integer)\n",
             data, line);
-        free(line);
         exit(-1);
     }
 
@@ -263,17 +272,29 @@ static void assemble_line(vm_env *env, char *line)
 void assemble_from_fd(vm_env *env, int fd)
 {
     char *line = NULL;
+    char buffer[50000][100];
     size_t size = 0;
+    int line_cnt = 0;
     FILE *fp = fdopen(fd, "r");
+    table = create_table();
 
-    while (getline(&line, &size, fp) != -1) {
+
+    while (~getline(&line, &size, fp)) {
         if (line[0] == ';' || line[0] == '\n')
             continue;
         /* Remove trailing newline feed */
         line[strcspn(line, "\r\n")] = 0;
-        assemble_line(env, line);
+        /* Add line number of label to hashtable */
+        if (line[strlen(line) - 1] == ':') {
+            line[strlen(line) - 1] = '\0';
+            append_to_ht(line, line_cnt, table);
+        } else
+            strcpy(buffer[line_cnt++], line);
     }
     free(line);
+
+    for (int i = 0; i < line_cnt; i++)
+        assemble_line(env, buffer[i]);
 }
 
 #define ALIGN_TYPE long
